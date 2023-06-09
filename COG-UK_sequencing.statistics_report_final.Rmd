@@ -1,0 +1,444 @@
+---
+title: "COG-UK Genomes Publications"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+```{r Turn code printing off}
+knitr::opts_chunk$set(echo=FALSE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+# Initialisation
+```{r Clear environment}
+rm(list=ls())
+```
+
+```{r Setting up environment}
+library(tidyverse)
+print(paste('tidyverse_version:', packageVersion('tidyverse')))
+library(ggplot2)
+print(paste('ggplot2_version:', packageVersion('ggplot2')))
+library(ggrepel)
+print(paste('ggrepel_version:', packageVersion('ggrepel')))
+library(zoo)
+print(paste('zoo_version:', packageVersion('zoo')))
+library(reshape)
+print(paste('reshape_version:', packageVersion('reshape')))
+library(knitr)
+print(paste('knitr_version:', packageVersion('knitr')))
+```
+
+```{r Data loaded in}
+data <- read.csv("CLIMB data_20200301-20210801_genomes.per.day.per.org.csv")
+```
+
+# Processing
+```{r List organisation names}
+list_orgs.names <- unique(data$sequencing_org)
+```
+
+```{r Create summary table by organisation}
+sequencing_by.org <- data %>% count(sequencing_org)
+
+colnames(sequencing_by.org)[2] <- 'publications'
+
+# create additional columns and initialise
+sequencing_by.org$start.date <- 0
+sequencing_by.org$first.publish <- 0
+sequencing_by.org$total <- 0
+
+for (x in 1:nrow(sequencing_by.org)){
+  # add start date and end dates
+  sequencing_by.org$start.date[x] <- min(data$published_date[data$sequencing_org == sequencing_by.org$sequencing_org[x]])
+  sequencing_by.org$end.date[x] <- max(data$published_date[data$sequencing_org == sequencing_by.org$sequencing_org[x]])
+  
+  # add total first genomes publishes
+  sequencing_by.org$first.publish[x] <- data$genomes_published[data$published_date == min(data$published_date[data$sequencing_org == sequencing_by.org$sequencing_org[x]]) & data$sequencing_org == sequencing_by.org$sequencing_org[x]]
+
+  # add total genomes publishes
+  sequencing_by.org$total[x] <- sum(data$genomes_published[data$sequencing_org == sequencing_by.org$sequencing_org[x]])
+  
+  # time duration
+  sequencing_by.org$duration.days[x] <- as.numeric(1 + as.Date(sequencing_by.org$end.date[x]) - as.Date(sequencing_by.org$start.date[x]))
+  sequencing_by.org$rates[x] <- sequencing_by.org$total[x]/sequencing_by.org$duration.days[x]
+}
+```
+
+```{r Fill out}
+# spread and melt to achieve 0 values when organisations have not published on a date
+data_wide <- spread(data, published_date, genomes_published)
+data_wide[is.na(data_wide)] <- 0
+data_filled <- as.data.frame(t(data_wide))
+
+names(data_filled) <- data_filled[1,]
+data_filled <- data_filled[-c(1,1),]
+data_filled <- rownames_to_column(data_filled)
+names(data_filled)[1] <- 'published_date'
+data_filled$published_date <- as.Date(data_filled$published_date)
+data_filled[,2:25] <- sapply(data_filled[,2:25], as.integer)
+
+data_melted <- melt(data_filled, id.vars = 'published_date')
+names(data_melted) <- names(data)
+data_melted <- data_melted %>% arrange(published_date)
+
+data <- data_melted
+
+# convert dates in data
+data$published_date <- as.Date(data$published_date)
+```
+
+```{r Add in institution type}
+academic.institutions <- c("Birmingham", "Cambridge", "Crick COVID19 Consortium (CCC)", "Edinburgh", "Exeter", "Leeds", "Liverpool", "Northern Ireland", "Northumbria", "Norwich", "Nottingham", "Oxford", "Portsmouth", "Sheffield", "UCL/UCH", "UHCW/University of Warwick")
+
+PH.institutions <- c("Health Protection Scotland (Glasgow)", "Public Health England (Colindale)", "Public Health Wales (Cardiff)")
+
+NHS.institutions <- c("Barts Health NHS Trust", "Guy's and St. Thomas' NHS Foundation Trust (London)", "St George's University Hospitals NHS Foundation Trust", "UCLH Advanced Pathogen Diagnostics Unit")
+
+
+# input institution types into sequencing_by.org
+sequencing_by.org$institution_type <- 0
+sequencing_by.org$anonymised <- 0
+sequencing_by.org <- sequencing_by.org %>% arrange(start.date)
+
+Univ <- 0
+PHA <- 0
+NHS.lab <- 0
+
+for (i in 1:nrow(sequencing_by.org)){
+  if (sequencing_by.org$sequencing_org[i] %in% academic.institutions){
+    sequencing_by.org$institution_type[i] <- "Academic"
+    Univ <- Univ + 1
+    sequencing_by.org$anonymised[i] <- paste('Univ_', Univ, sep = '')
+
+  } else if (sequencing_by.org$sequencing_org[i] %in% PH.institutions){
+    sequencing_by.org$institution_type[i] <- "Public Health"
+    
+    PHA <- PHA + 1
+    sequencing_by.org$anonymised[i] <- paste('PHA_', PHA, sep = '')
+
+  } else if (sequencing_by.org$sequencing_org[i] %in% NHS.institutions){
+    sequencing_by.org$institution_type[i] <- "NHS hospital lab"
+    
+    NHS.lab <- NHS.lab + 1
+    sequencing_by.org$anonymised[i] <- paste('NHS.lab_', NHS.lab, sep = '')
+
+  } else {
+      sequencing_by.org$institution_type[i] <- "Sanger"
+      sequencing_by.org$anonymised[i] <- "WSI"
+      }
+}
+
+# check all institutions have been accounted for
+orgs_not.accounted <- list_orgs.names[(list_orgs.names %in% academic.institutions
+                            | list_orgs.names %in% PH.institutions 
+                            | list_orgs.names %in% NHS.institutions 
+                            | list_orgs.names == "Wellcome Sanger Institute"
+                            ) == FALSE]
+
+if (length(orgs_not.accounted) == 0) {print('all institutions accounted for')} else {print(orgs_not.accounted)}
+
+sequencing_by.org$anonymised.start.date <- paste(sequencing_by.org$anonymised, ' (started ', as.Date(sequencing_by.org$start.date), ')', sep = '')
+
+
+# input institution types into data(df)
+data$institution_type <- 0
+
+for (i in 1:nrow(data)){
+
+  if (data$sequencing_org[i] %in% academic.institutions){
+    data$institution_type[i] <- "Academic"
+
+  } else if (data$sequencing_org[i] %in% PH.institutions){
+    data$institution_type[i] <- "Public Health"
+
+  } else if (data$sequencing_org[i] %in% NHS.institutions){
+    data$institution_type[i] <- "NHS hospital lab"
+    
+  } else {
+    data$institution_type[i] <- "Sanger"
+    }
+}
+
+# add anonymised labels and start date to data
+data$start.date <- 0
+data$anonymised <- 0
+data$anonymised.start.date <- 0
+
+for(i in 1:nrow(data)){
+  for (j in 1:nrow(sequencing_by.org))
+    if (data$sequencing_org[i] == sequencing_by.org$sequencing_org[j]){
+      data$start.date[i] <- sequencing_by.org$start.date[j]
+      data$anonymised[i] <- sequencing_by.org$anonymised[j]
+      data$anonymised.start.date[i] <- sequencing_by.org$anonymised.start.date[j]
+    }
+}
+
+sequencing_by.org$anonymised <- factor(as.character(sequencing_by.org$anonymised, levels = order(sequencing_by.org$start.date)))
+```
+
+```{r Cumulative calculations}
+# add cumulative sums by institution_type, sequencing_org and total to dataframe
+data <- data %>%  
+  arrange(published_date) %>%
+  mutate(genomes_published.cumsum_total = cumsum(genomes_published)) %>%
+  group_by(institution_type, published_date) %>%
+  mutate(genomes_published.sum_by.institution = sum(genomes_published)) %>%
+  ungroup() %>% group_by(institution_type) %>%
+  mutate(genomes_published.cumsum_by.institution = cumsum(genomes_published)) %>%
+  ungroup() %>% group_by(sequencing_org) %>%
+  mutate(genomes_published.cumsum_by.org = cumsum(genomes_published))
+```
+
+```{r Calculate percentages of genomes published}
+total_data.genomes_published <- sum(data$genomes_published)
+total_sequencing_by.org.genomes_published <- sum(sequencing_by.org$total)
+
+# check sequencing_by.org$total == data$genomes_published
+if(total_data.genomes_published == total_sequencing_by.org.genomes_published){
+  print('Total genomes_published consistant')
+  print(paste('Total genomes published : ', total_sequencing_by.org.genomes_published, sep = ""))
+  
+  sequencing_by.org$pct <- 0
+  
+  # calculate percentages of the total number genomes published contributed by each organisation
+  for (i in 1:nrow(sequencing_by.org)){
+    sequencing_by.org$pct[i] <- sequencing_by.org$total[i]/total_sequencing_by.org.genomes_published * 100
+  }
+  
+  max.total.genomes_published.institute_number_pct <- c(sequencing_by.org$sequencing_org[which(sequencing_by.org$total == max(sequencing_by.org$total))], 
+                                                        sequencing_by.org$total[which(sequencing_by.org$total == max(sequencing_by.org$total))],
+                                                        sequencing_by.org$pct[which(sequencing_by.org$total == max(sequencing_by.org$total))])
+
+    
+  print(paste('Maximum number of genomes published by ', 
+              max.total.genomes_published.institute_number_pct[1], ': ', 
+              max.total.genomes_published.institute_number_pct[2], 
+              ' (', round(as.double(max.total.genomes_published.institute_number_pct[3]),2), '%)'
+              , sep = ""))
+
+} else {
+    print(paste('total.data.genomes_published: ', total_data.genomes_published, sep = ''))
+    print(paste('total.sequencing_org.genomes_published: ', total_sequencing_by.org.genomes_published, sep = ''))
+  }
+```
+
+\newpage
+# Abbreviation and anonymisation key
+```{r Print abbreviation key}
+kable(sequencing_by.org[c('sequencing_org', 'anonymised')])
+```
+
+### Figure 5. Cumulative numbers of genomes published by each collective institute type combined with individual publication numbers
+```{r Figure 5. Cumulative numbers of genomes published by each collective institute type combined with individual publication numbers}
+figure_5 <- ggplot(data[which(data$genomes_published>0),], aes(x = published_date)) + 
+  geom_step(aes(y = genomes_published.cumsum_total)) +
+  geom_point(aes(y = genomes_published.sum_by.institution, 
+                 colour = institution_type, 
+                 shape = institution_type), 
+             alpha = 0.61, size = 0.84) +
+  geom_step(aes(y = genomes_published.cumsum_by.institution, 
+                colour = institution_type), 
+            alpha = 0.77) +
+  scale_y_continuous(trans='log10', 
+                     labels = function(x) format(x, scientific = FALSE), # [1]
+                     limits = c(1,750000)) + 
+  scale_x_date(date_breaks = "1 month", 
+               date_labels = "%m-%Y", 
+               limits = as.Date(c("2020-03-01","2021-08-01"))) +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  labs(x = 'Date Published', 
+       y = 'Number of SARS-CoV-2 genomes published',
+       colour = 'Institution Type', 
+       shape = 'Institution Type')
+
+figure_5
+#ggsave(file = 'figures/figure_5.jpg', figure_5)
+```
+
+### Figure 8. Numbers of genomes sequenced by each collective institution type
+```{r Figure 8. Numbers of genomes sequenced by each collective institution type}
+sum_institute.types <- aggregate(data$genomes_published, by = list(Category = data$institution_type), FUN = sum)
+colnames(sum_institute.types) <- c('institution_type', 'genomes_published')
+# DU: COMMENT on why!!!
+
+data_institute.types <- data[c('published_date', 'institution_type', 'genomes_published.sum_by.institution')]
+data_institute.types <- distinct(data_institute.types)
+data_institute.types <- data_institute.types %>% group_by(institution_type) %>%
+  mutate(genomes_published.cumsum_by.institution = cumsum(genomes_published.sum_by.institution))
+
+figure_8 <- ggplot(data_institute.types, aes(x = published_date, group = institution_type)) +
+  geom_col(aes(y = genomes_published.sum_by.institution, fill = institution_type)) +
+  geom_line(aes(y = genomes_published.cumsum_by.institution), 
+            colour = 'black') +
+  scale_y_continuous(trans='log10', expand = c(0,0)) +
+  geom_text(data = sum_institute.types, 
+            aes(y = 33300, 
+                x = as.Date("2020-04-01"), 
+                label = genomes_published, 
+                colour = institution_type), 
+            fontface ='bold', 
+            nudge_y = -0.22) +
+  geom_text(data = sum_institute.types, 
+            aes(y = 33300, 
+                x = as.Date("2021-07-01"), 
+                label = paste(round(100*genomes_published/sum(genomes_published),2),'%'), 
+                colour = institution_type), 
+            nudge_y = -0.22) +
+  facet_wrap(~institution_type, ncol=1) +
+  scale_x_date(date_breaks = "2 month", 
+               date_labels = "%m-%Y", 
+               limits = c(as.Date("2020-03-01"),as.Date("2021-08-01"))) +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, size = 4.5)) +
+  labs(x = 'Date Published', 
+       y = 'Number of SARS-CoV-2 genomes published')
+
+#ggsave(file = 'figures/figure_8.jpg', figure_8)
+figure_8
+```
+
+### Figure 9a. Genome numbers published along with daily sequencing rates by institution type
+```{r Figure 9a. Genome numbers published along with daily sequencing rates by institution type}
+
+data_institute.types <- data_institute.types %>% 
+  group_by(institution_type) %>% 
+  mutate(roll_mean = rollapply(genomes_published.sum_by.institution, 7, mean, partial=TRUE))
+  
+data_institute.types$roll_mean[data_institute.types$genomes_published.cumsum_by.institution == 0] <- NA
+
+figure_9.a <- ggplot() +
+  geom_point(data = data[which(data$genomes_published > 0),], 
+             aes(x = published_date, 
+                 y = genomes_published, 
+                 colour = institution_type, 
+                 shape = institution_type), 
+             alpha = 0.42, size = 0.84) + 
+  geom_smooth(data = data_institute.types, 
+              aes(x = published_date, 
+                  y = roll_mean, 
+                  colour = institution_type), 
+              se = FALSE, span = 0.42) +
+  scale_y_continuous(trans='log10', expand = c(0,0)) +
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+        plot.title = element_text(size = 9)) +
+  scale_x_date(date_breaks = "1 month", 
+               date_labels = "%m-%Y") +
+  labs(x = 'Date Published', 
+       y = 'Number of SARS-CoV-2 genomes published',
+       colour = 'Institution Type', 
+       shape = 'Institution Type')
+
+#ggsave(file = 'figures/figure_9.jpg', figure_9.a)
+figure_9.a
+```
+
+### Figure 11. Cumulative numbers of sequences published by each institution type
+```{r Figure 11. Cumulative numbers of sequences published by each institution type}
+data$institution_type <- factor(data$institution_type, levels = c('Sanger', 'Academic', 'Public Health', 'NHS hospital lab'))
+
+data_by.institution.type <- subset(data, !duplicated(data[c('genomes_published.sum_by.institution', 'institution_type', 'published_date')]))
+
+figure_11 <- ggplot(data_by.institution.type, aes(x = published_date, y = genomes_published.cumsum_by.institution, group = institution_type)) + 
+  geom_area(position = 'stack', alpha = 0.67, aes(fill = institution_type)) + 
+  geom_line(position = 'stack', aes(colour = institution_type)) + 
+  theme(legend.position = 'bottom', 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  geom_hline(aes(yintercept = 719799)) + 
+  labs(x = 'Date Published', 
+       y = 'Number of SARS-CoV-2 genomes published', 
+       colour = 'Institute Type', 
+       fill = 'Institute Type') + 
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) + # [1]
+  scale_x_date(date_breaks = "1 month", 
+               date_labels = "%m-%Y") + 
+  guides(fill = guide_legend(ncol = 6, byrow = TRUE), 
+         colour = guide_legend(ncol = 6, byrow = TRUE))
+
+#ggsave(file = 'figures/figure_11.jpg', figure_11)
+figure_11
+```
+
+### Figure 7. Numbers of genomes sequenced by each individual sequencing organisation
+```{r Figure 7}
+sequencing_by.org <- sequencing_by.org %>% arrange(start.date)
+data$anonymised <- factor(data$anonymised, levels = sequencing_by.org$anonymised)
+
+figure_7 <- ggplot(data %>% 
+         group_by(anonymised) %>% 
+         arrange(published_date) %>% 
+         mutate(genomes_published.cumulative = cumsum(genomes_published)), 
+         aes(x=published_date, colour=anonymised, y = genomes_published)) +
+  geom_step(aes(y = genomes_published.cumulative), 
+            colour = 'black') +
+  geom_col(size = 0.16) +
+  scale_y_continuous(trans='log10', expand = c(0,0)) +
+  geom_text(data = sequencing_by.org, 
+            aes(x = as.Date("2020-06-01"),
+                label = start.date, 
+                colour = anonymised, y=66000), 
+            size = 2.2) +
+  geom_text(data = sequencing_by.org, 
+            aes(x = as.Date("2021-06-01"),
+                label = total, 
+                colour = anonymised, 
+                y = 66000), 
+            fontface ='bold', size = 2.2) +
+  facet_wrap(~anonymised, ncol = 4) +
+  scale_x_date(date_breaks = "2 month", 
+               date_labels = "%m-%Y", 
+               limits = c(as.Date("2020-03-01"),as.Date("2021-08-01"))) +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 90, size = 4.5), 
+        strip.text.x = element_text(size = 4.5),
+        plot.caption = element_text(size = 6.1),
+        plot.title = element_text(size = 9)) +
+  labs(x = 'Date Published', 
+       y = 'Number of SARS-CoV-2 genomes published')
+
+#ggsave(file = 'figures/figure_7.jpg', figure_7)
+figure_7
+```
+
+### Figure 12g. Bubble chart showing the total number genomes published by each sequencing organisation, along with their starting date, number of publication events and bubble sizes proportional to their average number of sequences published per publication event
+```{r Figure 12g. y: total number of genomes published; x: starting date; bubble size: average number of genomes published}
+set.seed(88)
+
+figure_12g <- ggplot(sequencing_by.org %>% mutate(avg_genomes_published = total/publications)) + 
+  geom_point(aes(x = as.Date(start.date), 
+                 y = total, 
+                 colour = institution_type, 
+                 size = avg_genomes_published), 
+             alpha = 0.42) +
+  geom_text_repel(aes(y = total, 
+                      x = as.Date(start.date), 
+                      label = paste(anonymised, ': ', publications, ' publications', sep = '' ), colour = institution_type), 
+                  min.segment.length = 0, 
+                  force = 44, 
+                  segment.linetype = 4, 
+                  segment.alpha = 0.65, 
+                  size = 2.4, 
+                  fontface ='bold', 
+                  max.overlaps = Inf) + 
+  theme(legend.position = "bottom", 
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+        plot.title = element_text(size = 9)) +
+  scale_y_continuous(trans='log10', 
+                     labels = function(x) format(x, scientific = FALSE)) + 
+  scale_x_date(date_breaks = "1 month", 
+               date_labels = "%m-%Y") + 
+  labs(x = 'Date started sequencing', 
+       y = 'Total number of genomes published', 
+       size = 'Average number of genomes per publication') +
+  scale_colour_discrete(guide = 'none') +
+  scale_size(breaks = c(1,10,100,1000), 
+             range = c(1,10), 
+             limits = c(10,1600))
+
+#ggsave(file = 'figures/figure_12.jpg', figure_12g)
+figure_12g
+```
